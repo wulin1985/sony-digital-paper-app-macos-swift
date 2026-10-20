@@ -60,6 +60,15 @@ if args.contains("--p2") {
     sem.wait()
     exit(0)
 }
+if args.contains("--wifi-verify") {
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        await SmokeTest.wifiVerify()
+        sem.signal()
+    }
+    sem.wait()
+    exit(0)
+}
 if args.contains("--full") || args.contains("--roundtrip") {
     let pdfArgIndex = args.firstIndex(of: "--roundtrip").flatMap { idx in
         idx + 1 < args.count ? idx + 1 : nil

@@ -573,16 +573,28 @@ final class DPTClient: NSObject, URLSessionDelegate, @unchecked Sendable {
                rssiLevel: (obj["rssi_level"] as? String).flatMap(Int.init) ?? (obj["rssi_level"] as? Int))
     }
 
-    /// 扫描周围 WiFi（耗时约 5-15 秒）
+    /// 扫描周围 WiFi（耗时约 5-15 秒，设备端扫描）
     func scanWiFi() async throws -> [WiFiAP] {
         try await ensureAuthed()
         return try await reauth {
-            let (data, _) = try await self.send(self.request("POST", "system/controls/wifi_accesspoints/scan"), expected: [200])
+            var req = self.request("POST", "system/controls/wifi_accesspoints/scan")
+            req.timeoutInterval = 45
+            let (data, _) = try await self.send(req, expected: [200])
             guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let list = obj["aplist"] as? [[String: Any]] else {
                 throw DPTError.invalidResponse
             }
             return list.map { DPTClient.parseAP($0) }
+        }
+    }
+
+    /// WiFi 开关状态（GET /system/configs/wifi → {"value":"on"|"off"}；PUT 同路径切换）
+    func wifiConfig() async throws -> String {
+        try await ensureAuthed()
+        return try await reauth {
+            let (data, _) = try await self.send(self.request("GET", "system/configs/wifi"), expected: [200])
+            let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            return (obj["value"] as? String) ?? ""
         }
     }
 
@@ -689,9 +701,21 @@ final class DPTClient: NSObject, URLSessionDelegate, @unchecked Sendable {
 
     func takeScreenshot() async throws -> Data {
         try await ensureAuthed()
-        return try await reauth {
-            let (data, _) = try await self.send(self.request("GET", "system/controls/screen_shot"), expected: [200])
-            return data
+        // 主端点 screen_shot（PNG）；个别状态下挂起，超时后回退 screen_shot2?query=jpeg
+        do {
+            return try await reauth {
+                var req = self.request("GET", "system/controls/screen_shot")
+                req.timeoutInterval = 30
+                let (data, _) = try await self.send(req, expected: [200])
+                return data
+            }
+        } catch {
+            return try await reauth {
+                var req = self.request("GET", "system/controls/screen_shot2?query=jpeg")
+                req.timeoutInterval = 60
+                let (data, _) = try await self.send(req, expected: [200])
+                return data
+            }
         }
     }
 

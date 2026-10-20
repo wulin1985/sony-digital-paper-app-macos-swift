@@ -297,4 +297,94 @@ enum SmokeTest {
 
         summary(pass: pass, fail: fail)
     }
+
+    // MARK: WiFi 专项验证：临时开 WiFi → 验证 WiFi API → 恢复原状 + 长超时截屏
+    // 用于 USB 场景（设备 WiFi 关闭时 wifi_* API 返回 40304）
+
+    static func wifiVerify() async {
+        var pass = 0, fail = 0
+        func check(_ name: String, _ ok: Bool, _ detail: String = "") {
+            let mark = ok ? "✅" : "❌"
+            print("\(mark) \(name)\(detail.isEmpty ? "" : " — \(detail)")")
+            if ok { pass += 1 } else { fail += 1 }
+        }
+
+        guard let client = try? makeClient() else {
+            print("❌ 密钥加载失败"); exit(1)
+        }
+
+        // 0. 当前 WiFi 开关状态
+        var wasOn = false
+        do {
+            let cfg = try await client.wifiConfig()
+            wasOn = (cfg == "on")
+            check("GET /system/configs/wifi", true, "wifi=\(cfg)")
+        } catch {
+            check("GET /system/configs/wifi", false, error.localizedDescription)
+        }
+
+        // 1. 临时开 WiFi（USB 连接态下设备可能锁定 WiFi 开关，40307 属预期）
+        var turnedOn = false
+        if !wasOn {
+            do {
+                try await client.updateConfig(key: "wifi", value: "on")
+                check("PUT wifi on（临时）", true)
+                turnedOn = true
+                try await Task.sleep(nanoseconds: 4_000_000_000)
+            } catch {
+                check("PUT wifi on（临时）", false,
+                      error.localizedDescription.contains("40307")
+                      ? "40307 设备拒绝（USB 连接态锁定 WiFi 开关，属固件限制，需在 WiFi 场景验证）"
+                      : error.localizedDescription)
+            }
+        }
+
+            // 2-4. WiFi API 验证
+            if let st = try? await client.wifiState() {
+                check("GET wifi_state", true, "ssid=\(st.ssid.isEmpty ? "(未连接)" : st.ssid) state=\(st.state ?? "?")")
+            } else {
+                check("GET wifi_state", false)
+            }
+
+            if let saved = try? await client.registeredWiFi() {
+                check("GET wifi_accesspoints（已保存）", true, "\(saved.count) 个网络")
+            } else {
+                check("GET wifi_accesspoints（已保存）", false)
+            }
+
+            do {
+                let scanned = try await client.scanWiFi()
+                check("POST wifi scan", true, "\(scanned.count) 个网络")
+                for ap in scanned.prefix(3) {
+                    print("   · \(ap.ssid) sec=\(ap.security) rssi=\(ap.rssiLevel.map(String.init) ?? "?")")
+                }
+            } catch {
+                check("POST wifi scan", false, error.localizedDescription)
+            }
+
+        // 5. 恢复 WiFi 原状（仅在成功开启过的情况下才需要关回）
+        if turnedOn && !wasOn {
+            do {
+                try await client.updateConfig(key: "wifi", value: "off")
+                check("PUT wifi off（恢复原状）", true)
+            } catch {
+                check("PUT wifi off（恢复原状）", false, "⚠️ 设备 WiFi 当前为 on，请手动关闭或重跑")
+            }
+        } else {
+            check("无需恢复（未成功开启）", true, wasOn ? "原状即 on" : "原状 off，开启未成功")
+        }
+
+        // 6. 截屏（60s 长超时）
+        do {
+            let png = try await client.takeScreenshot()
+            let isPng = png.count > 100 && png.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47])
+            let path = "/tmp/dpt-screenshot-\(Int(Date().timeIntervalSince1970)).png"
+            try png.write(to: URL(fileURLWithPath: path))
+            check("GET screen_shot", isPng, "\(png.count)B → \(path)")
+        } catch {
+            check("GET screen_shot", false, error.localizedDescription)
+        }
+
+        summary(pass: pass, fail: fail)
+    }
 }
